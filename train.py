@@ -7,30 +7,20 @@ import torch.nn as nn
 import torch.optim as optim
 from torch.utils.data import DataLoader
 
-# Import dari file proyek
 from model_dme import DensityMapRegressor
 from dataset_loader import (
     DMEDataset, load_all_samples, stratified_split,
     get_train_transforms, get_val_transforms,
 )
 
-
-# ============================================================
-# Hyperparameters Default
-# ============================================================
 EPOCHS = 30
-BATCH_SIZE = 2          # Kecil karena komputasi heatmap cukup berat
-LEARNING_RATE_SCRATCH = 5e-5    # Learning rate untuk training dari scratch
-LEARNING_RATE_FINETUNE = 1e-5   # Learning rate lebih kecil untuk fine-tuning
+BATCH_SIZE = 2
+LEARNING_RATE_SCRATCH = 5e-5
+LEARNING_RATE_FINETUNE = 1e-5
 CHECKPOINT_DIR = 'checkpoints'
 BEST_MODEL_PATH = os.path.join(CHECKPOINT_DIR, 'best_dme_model_finetuned.pth')
 
-
 def select_device():
-    """
-    Deteksi device secara otomatis.
-    Prioritas: CUDA (Nvidia GPU) > MPS (Apple Silicon) > CPU
-    """
     if torch.cuda.is_available():
         device = torch.device('cuda')
         gpu_name = torch.cuda.get_device_name(0)
@@ -43,27 +33,17 @@ def select_device():
         print(f"  Device   : CPU")
     return device
 
-
 def train(args):
-    """
-    Fungsi utama untuk training model DME.
-    Bisa training dari scratch (ImageNet pretrained weights) atau fine-tuning
-    dari external checkpoint.
-    """
     print("\n" + "=" * 65)
     print("  TRAINING / FINE-TUNING — Density Map Estimation (DME)")
     print("=" * 65)
 
-    # ---- 1. Device Selection ----
     device = select_device()
 
-    # ---- 2. Buat folder checkpoint ----
     os.makedirs(CHECKPOINT_DIR, exist_ok=True)
 
-    # ---- 3. Dataset & DataLoader ----
     print(f"\n  [Dataset]")
 
-    # Load semua samples dan split secara stratified
     all_samples = load_all_samples()
     if len(all_samples) == 0:
         print("\n  [ERROR] Tidak ada data training!")
@@ -90,7 +70,7 @@ def train(args):
         train_dataset,
         batch_size=BATCH_SIZE,
         shuffle=True,
-        num_workers=0,      # 0 untuk Windows compatibility
+        num_workers=0,
         pin_memory=True if device.type == 'cuda' else False,
     )
     val_loader = DataLoader(
@@ -107,11 +87,9 @@ def train(args):
     print(f"  Train batches  : {len(train_loader)}")
     print(f"  Val batches    : {len(val_loader)}")
 
-    # ---- 4. Model & Checkpoint Loading ----
     print(f"\n  [Model]")
     model = DensityMapRegressor(pretrained=not args.resume)
     
-    # Tentukan learning rate berdasarkan mode (resume vs scratch)
     current_lr = args.lr if args.lr is not None else (LEARNING_RATE_FINETUNE if args.resume else LEARNING_RATE_SCRATCH)
     start_epoch = 1
 
@@ -139,18 +117,15 @@ def train(args):
     print(f"  Architecture   : MobileNetV2 + Dilated Conv + Upsample")
     print(f"  Total params   : {total_params:,}")
 
-    # ---- 5. Loss Function & Optimizer ----
     criterion = nn.MSELoss()
     optimizer = optim.Adam(model.parameters(), lr=current_lr)
 
     if args.resume and args.load_optimizer:
-        # User requested to restore optimizer state. Requires weights_only=False
         checkpoint_full = torch.load(args.resume, map_location=device, weights_only=False) 
         if 'optimizer_state_dict' in checkpoint_full:
             optimizer.load_state_dict(checkpoint_full['optimizer_state_dict'])
             print(f"  Optimizer state: Restored from checkpoint")
             
-            # Update learning rate on restored optimizer if user specified a custom lr or to ensure finetune lr is used
             for param_group in optimizer.param_groups:
                 param_group['lr'] = current_lr
         else:
@@ -164,7 +139,6 @@ def train(args):
     print(f"  Freeze backbone: {'Yes (first 5 epochs)' if args.freeze_backbone else 'No'}")
     print(f"  Checkpoint dir : {os.path.abspath(CHECKPOINT_DIR)}")
 
-    # ---- 6. Training Loop ----
     best_val_mae = float('inf')
 
     print("\n" + "-" * 80)
@@ -175,21 +149,17 @@ def train(args):
     for epoch in range(start_epoch, EPOCHS + 1):
         epoch_start = time.time()
 
-        # ======== FREEZE / UNFREEZE LOGIC ========
         if args.freeze_backbone:
             if epoch <= 5:
-                # Freeze features
                 for param in model.features.parameters():
                     param.requires_grad = False
                 if epoch == 1:
                     print("  [INFO] Backbone is FROZEN for the first 5 epochs.")
             elif epoch == 6:
-                # Unfreeze features
                 for param in model.features.parameters():
                     param.requires_grad = True
                 print("  [INFO] Backbone UNFROZEN for the remaining epochs.")
 
-        # ======== TRAINING PHASE ========
         model.train()
         epoch_loss = 0.0
         epoch_mae = 0.0
@@ -200,7 +170,7 @@ def train(args):
             heatmaps = batch['heatmap'].to(device)      # (B, H, W)
             heatmaps = heatmaps.unsqueeze(1)
 
-            outputs = model(images)                     # (B, 1, H, W)
+            outputs = model(images)
             loss = criterion(outputs, heatmaps * 1000.0)
 
             optimizer.zero_grad()
@@ -220,7 +190,6 @@ def train(args):
         avg_train_loss = epoch_loss / num_train_samples
         avg_train_mae = epoch_mae / num_train_samples
 
-        # ======== VALIDATION PHASE ========
         model.eval()
         val_preds = []
         val_gts = []
@@ -245,29 +214,24 @@ def train(args):
         avg_val_mae = np.mean(np.abs(val_preds_arr - val_gts_arr))
         val_rmse = np.sqrt(np.mean((val_preds_arr - val_gts_arr) ** 2))
         
-        # MAPE & Mean Counting Accuracy with safe masking for zero targets
         mask = val_gts_arr > 0
         if np.sum(mask) > 0:
             val_mape = np.mean(np.abs(val_gts_arr[mask] - val_preds_arr[mask]) / val_gts_arr[mask]) * 100
             
-            # Mean Counting Accuracy: clipped to [0, 100]%
             acc_vals = 1.0 - np.abs(val_preds_arr[mask] - val_gts_arr[mask]) / val_gts_arr[mask]
             acc_vals = np.clip(acc_vals, 0.0, 1.0)
             val_accuracy = np.mean(acc_vals) * 100
         else:
             val_mape = 0.0
-            # If all gt are 0, accuracy is 100% if pred is 0, else 0%
             acc_vals = np.where(val_preds_arr == 0.0, 100.0, 0.0)
             val_accuracy = np.mean(acc_vals)
 
-        # R2 score computed manually: 1 - (SS_res / SS_tot)
         ss_res = np.sum((val_gts_arr - val_preds_arr) ** 2)
         ss_tot = np.sum((val_gts_arr - np.mean(val_gts_arr)) ** 2)
         val_r2 = 1.0 - (ss_res / ss_tot) if ss_tot > 0.0 else 0.0
 
         epoch_time = time.time() - epoch_start
 
-        # ---- Model Checkpointing (based on val MAE) ----
         is_best = avg_val_mae < best_val_mae
         if is_best:
             best_val_mae = avg_val_mae
@@ -284,7 +248,6 @@ def train(args):
                 'loss': avg_train_loss,
             }, BEST_MODEL_PATH)
             
-            # Export CSV of actual vs predicted counts
             try:
                 reports_dir = 'reports'
                 os.makedirs(reports_dir, exist_ok=True)
@@ -298,7 +261,6 @@ def train(args):
             except Exception as e:
                 print(f"  [WARNING] Gagal mengekspor CSV: {e}")
                 
-            # Generate scatter plot
             try:
                 import matplotlib
                 matplotlib.use('Agg')
@@ -307,7 +269,6 @@ def train(args):
                 plt.figure(figsize=(8, 6))
                 plt.scatter(val_gts, val_preds, alpha=0.7, color='blue', edgecolors='k', label='Samples')
                 
-                # Draw ideal y=x line
                 max_val = max(max(val_gts), max(val_preds)) if len(val_gts) > 0 else 10.0
                 plt.plot([0, max_val], [0, max_val], 'r--', label='Ideal (y = x)')
                 
@@ -326,19 +287,16 @@ def train(args):
         else:
             marker = ""
 
-        # ---- Logging ----
         print(f"  {epoch:>5}  |  {avg_train_loss:>12.8f}  |  {avg_train_mae:>10.4f}  |  "
               f"{avg_val_mae:>10.4f}  |  {best_val_mae:>12.4f}  |  "
               f"{epoch_time:.1f}s{marker}")
         print(f"         |- Val Metrics: RMSE: {val_rmse:.4f} | MAPE: {val_mape:.2f}% | R2: {val_r2:.4f} | Accuracy: {val_accuracy:.2f}%")
 
-    # ---- Training Selesai ----
     print("-" * 80)
     print(f"\n  Training selesai!")
     print(f"  Best Val MAE   : {best_val_mae:.4f}")
     print(f"  Best model     : {os.path.abspath(BEST_MODEL_PATH)}")
     print("=" * 65 + "\n")
-
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(description="DME Training & Fine-tuning Script")
