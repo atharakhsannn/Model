@@ -15,33 +15,19 @@ try:
 except ImportError:
     PANDAS_AVAILABLE = False
 
-# Import dari file proyek
 from model_dme import DensityMapRegressor
 from density_utils import create_visualization
 
-
-# ============================================================
-# Konfigurasi
-# ============================================================
-# Default fallback checkpoint (can be overridden by argparse)
 DEFAULT_CHECKPOINT = os.path.join('checkpoints', 'final_dme_97percent.pth')
 
-# Resolusi target - harus sama dengan yang digunakan saat training (dataset_loader.py)
-TARGET_SIZE = (672, 512)  # (width, height)
+TARGET_SIZE = (672, 512)
 
-# Normalisasi standar ImageNet
 IMAGENET_MEAN = [0.485, 0.456, 0.406]
 IMAGENET_STD = [0.229, 0.224, 0.225]
 
-# Debug mode: aktifkan assertion untuk memverifikasi count preservation saat resize
 DEBUG = True
 
-
 def select_device():
-    """
-    Deteksi device secara otomatis.
-    Prioritas: CUDA (Nvidia GPU) > MPS (Apple Silicon) > CPU
-    """
     if torch.cuda.is_available():
         device = torch.device('cuda')
         gpu_name = torch.cuda.get_device_name(0)
@@ -54,23 +40,13 @@ def select_device():
         print(f"  Device     : CPU")
     return device
 
-
 def get_inference_transforms():
-    """
-    Pipeline preprocessing untuk inference.
-    HANYA Normalize + ToTensorV2, TANPA resize (resize dilakukan secara manual
-    agar kita dapat mengembalikan density map ke ukuran asli).
-    """
     return A.Compose([
         A.Normalize(mean=IMAGENET_MEAN, std=IMAGENET_STD),
         ToTensorV2(),
     ])
 
-
 def load_model(checkpoint_path, device):
-    """
-    Inisiasi model, load bobot dari checkpoint, set ke eval mode.
-    """
     model = DensityMapRegressor(pretrained=False)
     model = model.to(device)
 
@@ -86,67 +62,46 @@ def load_model(checkpoint_path, device):
 
     return model
 
-
 def preprocess_image(image_path, transform):
-    """
-    Baca gambar dengan OpenCV, konversi ke RGB, dan siapkan tensor.
-    Menyimpan salinan gambar asli untuk visualisasi dan ukuran asli.
-    """
     image_bgr = cv2.imread(image_path)
     if image_bgr is None:
         raise FileNotFoundError(f"Gambar tidak ditemukan: {image_path}")
 
     image_rgb = cv2.cvtColor(image_bgr, cv2.COLOR_BGR2RGB)
-    original_image = image_rgb.copy()  # untuk visualisasi akhir
+    original_image = image_rgb.copy()
     orig_h, orig_w = original_image.shape[:2]
 
-    # Resize ke ukuran training (model hanya melihat resolusi ini saat training)
     image_resized = cv2.resize(image_rgb, TARGET_SIZE, interpolation=cv2.INTER_LINEAR)
 
-    # Terapkan normalisasi dan konversi ke tensor pada gambar yang sudah di‑resize
     transformed = transform(image=image_resized)
     image_tensor = transformed['image']  # Tensor (C, H, W) – ukuran target
 
     return image_tensor, original_image, (orig_w, orig_h)
 
-
 def predict(model, image_tensor, device):
-    """
-    Jalankan inference pada tensor yang sudah di‑resize ke target size.
-    Output density map masih pada ukuran target.
-    """
     image_tensor = image_tensor.unsqueeze(0).to(device)
 
     with torch.no_grad():
-        output = model(image_tensor)  # (1, 1, target_H, target_W)
+        output = model(image_tensor)
 
-    # Konversi ke numpy dan hilangkan scaling factor training (1000.0)
-    density_map = (output / 1000.0).squeeze().cpu().numpy()  # (target_H, target_W)
+    density_map = (output / 1000.0).squeeze().cpu().numpy()
 
-    # Hitung prediksi count pada ukuran target (untuk verifikasi)
     predicted_count_target = density_map.sum()
 
     return density_map, float(predicted_count_target)
 
-
 def resize_density_map_to_original(density_map, original_size, target_size=TARGET_SIZE):
-    """
-    Kembalikan density map ke ukuran asli gambar dengan koreksi area.
-    """
     orig_w, orig_h = original_size
     target_w, target_h = target_size
 
     if (orig_w == target_w) and (orig_h == target_h):
         return density_map
 
-    # Simpan sum sebelum resize untuk koreksi dan verifikasi
     sum_before = density_map.sum()
 
-    # Resize menggunakan bilinear interpolation
     density_orig = cv2.resize(density_map, (orig_w, orig_h),
                               interpolation=cv2.INTER_LINEAR)
 
-    # Koreksi area
     sum_after_resize = density_orig.sum()
     if sum_after_resize > 0:
         density_orig *= (sum_before / sum_after_resize)
@@ -158,11 +113,7 @@ def resize_density_map_to_original(density_map, original_size, target_size=TARGE
 
     return density_orig
 
-
 def visualize_result(original_image, overlay, predicted_count, image_name):
-    """
-    Tampilkan hasil prediksi menggunakan matplotlib.
-    """
     fig, axes = plt.subplots(1, 2, figsize=(16, 7))
 
     axes[0].imshow(original_image)
@@ -185,21 +136,15 @@ def visualize_result(original_image, overlay, predicted_count, image_name):
     plt.tight_layout(rect=[0, 0.03, 1, 0.93])
     plt.show()
 
-
 def run_prediction(image_path, checkpoint_path=DEFAULT_CHECKPOINT, target_size=TARGET_SIZE):
-    """
-    Pipeline lengkap prediksi yang sekarang scale-invariant.
-    """
     image_name = os.path.basename(image_path)
 
     print("\n" + "=" * 60)
     print("  PREDICT - Density Map Estimation (DME)  [Scale-Invariant]")
     print("=" * 60)
 
-    # ---- 1. Device ----
     device = select_device()
 
-    # ---- 2. Load Model ----
     print(f"\n  [Model Loading]")
     if not os.path.exists(checkpoint_path):
         print(f"\n  [ERROR] Checkpoint tidak ditemukan: {checkpoint_path}")
@@ -207,7 +152,6 @@ def run_prediction(image_path, checkpoint_path=DEFAULT_CHECKPOINT, target_size=T
         return
     model = load_model(checkpoint_path, device)
 
-    # ---- 3. Preprocess ----
     print(f"\n  [Preprocessing]")
     print(f"  Image      : {image_path}")
     transform = get_inference_transforms()
@@ -215,13 +159,11 @@ def run_prediction(image_path, checkpoint_path=DEFAULT_CHECKPOINT, target_size=T
     print(f"  Original size : {original_size[0]}x{original_size[1]}")
     print(f"  Resized to    : {target_size[0]}x{target_size[1]} (training resolution)")
 
-    # ---- 4. Inference (pada ukuran target) ----
     print(f"\n  [Inference]")
     density_map_target, count_target = predict(model, image_tensor, device)
     print(f"  Density map (target) shape : {density_map_target.shape}")
     print(f"  Predicted count (target)   : {count_target:.4f}")
 
-    # ---- 5. Kembalikan ke ukuran asli ----
     density_map_orig = resize_density_map_to_original(
         density_map_target, original_size, target_size
     )
@@ -232,7 +174,6 @@ def run_prediction(image_path, checkpoint_path=DEFAULT_CHECKPOINT, target_size=T
     print(f"  |  PREDICTED COUNT : {final_count:>8.1f} objek   |")
     print(f"  +-------------------------------------+")
 
-    # ---- 6. Visualisasi (menggunakan density_utils.create_visualization) ----
     overlay = create_visualization(
         original_image, density_map_orig,
         input_is_rgb=True,
@@ -244,23 +185,7 @@ def run_prediction(image_path, checkpoint_path=DEFAULT_CHECKPOINT, target_size=T
 
     return final_count
 
-
-# ============================================================
-# Report Generation
-# ============================================================
-
 def generate_reports(results, checkpoint_path, sort_order='alpha'):
-    """
-    Generate a CSV and a Markdown summary report after batch prediction.
-
-    Parameters:
-        results       : list of (image_name, predicted_count, density_map_sum)
-        checkpoint_path : str — path of the checkpoint used
-        sort_order    : 'alpha' | 'highest' | 'lowest'
-
-    Returns:
-        (csv_path, md_path) — absolute paths to the generated report files.
-    """
     REPORTS_DIR = 'reports'
     os.makedirs(REPORTS_DIR, exist_ok=True)
 
@@ -269,17 +194,15 @@ def generate_reports(results, checkpoint_path, sort_order='alpha'):
     md_path   = os.path.join(REPORTS_DIR, f'prediction_summary_{timestamp}.md')
     ckpt_name = os.path.basename(checkpoint_path)
 
-    # ---- Apply sort order ----
     if sort_order == 'highest':
         sorted_results = sorted(results, key=lambda x: x[1], reverse=True)
     elif sort_order == 'lowest':
         sorted_results = sorted(results, key=lambda x: x[1])
-    else:  # 'alpha' (default)
+    else:
         sorted_results = sorted(results, key=lambda x: x[0])
 
     counts = [r[1] for r in sorted_results]
 
-    # ---- Write CSV ----
     if PANDAS_AVAILABLE:
         df = pd.DataFrame(sorted_results,
                           columns=['Image Name', 'Predicted Count', 'Density Map Sum'])
@@ -292,7 +215,6 @@ def generate_reports(results, checkpoint_path, sort_order='alpha'):
             for name, count, dsum in sorted_results:
                 writer.writerow([name, f'{count:.4f}', f'{dsum:.4f}', ckpt_name])
 
-    # ---- Compute distribution buckets ----
     buckets = {
         '0–99':    sum(1 for c in counts if c < 100),
         '100–149': sum(1 for c in counts if 100 <= c < 150),
@@ -305,7 +227,6 @@ def generate_reports(results, checkpoint_path, sort_order='alpha'):
     top10_high = sorted(results, key=lambda x: x[1], reverse=True)[:10]
     top10_low  = sorted(results, key=lambda x: x[1])[:10]
 
-    # ---- Write Markdown ----
     with open(md_path, 'w', encoding='utf-8') as f:
         f.write('# DME Batch Prediction Summary Report\n\n')
         f.write(f'**Generated:** {datetime.now().strftime("%Y-%m-%d %H:%M:%S")}\n\n')
@@ -367,11 +288,7 @@ def generate_reports(results, checkpoint_path, sort_order='alpha'):
 
     return os.path.abspath(csv_path), os.path.abspath(md_path)
 
-
 def print_summary_to_terminal(results, checkpoint_path, csv_path, md_path, sort_order='alpha'):
-    """
-    Print a clean, human-readable summary report to the terminal after batch inference.
-    """
     ckpt_name = os.path.basename(checkpoint_path)
     counts    = [r[1] for r in results]
 
@@ -448,10 +365,6 @@ def print_summary_to_terminal(results, checkpoint_path, csv_path, md_path, sort_
     print(f'  Markdown : {md_path}')
     print(sep + '\n')
 
-
-# ============================================================
-# Eksekusi Utama
-# ============================================================
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(description="DME Prediction Script")
     parser.add_argument("--image", type=str, default=None, help="Path to test image")
@@ -486,26 +399,20 @@ if __name__ == '__main__':
             print(f"\n[{i+1}/{len(image_files)}] Memproses {file_name}...")
             img_path = os.path.join(args.dir, file_name)
             
-            # Temporarily disable plt.show by mocking it to prevent hanging during batch
             original_show = plt.show
             plt.show = lambda: plt.close('all')
             
             try:
                 final_count = run_prediction(img_path, checkpoint_path=args.checkpoint)
-                # store (name, predicted_count, density_map_sum) — counts are the same
                 results.append((file_name, final_count, final_count))
             finally:
                 plt.show = original_show
 
-        # results stored as (name, count, density_map_sum)
-        # generate reports and print terminal summary
         if results:
             csv_path, md_path = generate_reports(results, args.checkpoint, sort_order=args.sort)
             print_summary_to_terminal(results, args.checkpoint, csv_path, md_path, sort_order=args.sort)
         
     else:
-        # Single image mode
-        # Determine image path
         if args.image:
             if not os.path.exists(args.image):
                 print(f"[ERROR] File gambar tidak ditemukan: {args.image}")
@@ -513,7 +420,6 @@ if __name__ == '__main__':
             test_image = args.image
             print(f"Menggunakan gambar dari argumen: {test_image}")
         else:
-            # Fallback to default image in dataset/images
             test_image_dir = os.path.join('dataset', 'images')
             supported_ext = ('.jpg', '.jpeg', '.png', '.bmp', '.tif', '.tiff')
             
