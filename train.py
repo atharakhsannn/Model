@@ -23,7 +23,7 @@ BATCH_SIZE = 2          # Kecil karena komputasi heatmap cukup berat
 LEARNING_RATE_SCRATCH = 5e-5    # Learning rate untuk training dari scratch
 LEARNING_RATE_FINETUNE = 1e-5   # Learning rate lebih kecil untuk fine-tuning
 CHECKPOINT_DIR = 'checkpoints'
-BEST_MODEL_PATH = os.path.join(CHECKPOINT_DIR, 'best_dme_model.pth')
+BEST_MODEL_PATH = os.path.join(CHECKPOINT_DIR, 'best_dme_model_finetuned.pth')
 
 
 def select_device():
@@ -330,7 +330,7 @@ def train(args):
         print(f"  {epoch:>5}  |  {avg_train_loss:>12.8f}  |  {avg_train_mae:>10.4f}  |  "
               f"{avg_val_mae:>10.4f}  |  {best_val_mae:>12.4f}  |  "
               f"{epoch_time:.1f}s{marker}")
-        print(f"         └─ Val Metrics: RMSE: {val_rmse:.4f} | MAPE: {val_mape:.2f}% | R²: {val_r2:.4f} | Accuracy: {val_accuracy:.2f}%")
+        print(f"         |- Val Metrics: RMSE: {val_rmse:.4f} | MAPE: {val_mape:.2f}% | R2: {val_r2:.4f} | Accuracy: {val_accuracy:.2f}%")
 
     # ---- Training Selesai ----
     print("-" * 80)

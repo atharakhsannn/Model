@@ -3,6 +3,7 @@ import json
 import glob
 import numpy as np
 import cv2
+# pyrefly: ignore [missing-import]
 import torch
 from torch.utils.data import Dataset, DataLoader
 import albumentations as A
@@ -111,6 +112,11 @@ def load_all_samples(images_dir=IMAGES_DIR, annotations_dir=ANNOTATIONS_DIR):
 
         if image_path is not None and os.path.exists(image_path):
             name = os.path.splitext(os.path.basename(json_path))[0]
+            
+            # Filter: abaikan gear dan nut untuk sementara
+            if 'gear' in name.lower() or 'nut' in name.lower():
+                continue
+
             samples.append({
                 'image_path': image_path,
                 'points': points,
