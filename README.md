@@ -16,14 +16,16 @@ Proyek ini membangun pipeline end-to-end untuk menghitung jumlah part/komponen i
   - [Step 2: Anotasi Titik Koordinat](#step-2-anotasi-titik-koordinat-point_labelerpy)
   - [Step 3: Generate Ground Truth](#step-3-generate-ground-truth-density-map-generate_ground_truthpy)
   - [Step 4: Arsitektur Model](#step-4-arsitektur-model-model_dmepy)
-  - [Step 5: Utilitas & Visualisasi](#step-5-utilitas--visualisasi-generate_density_mappy)
+  - [Step 5: Utilitas & Visualisasi](#step-5-utilitas--visualisasi-density_utilspy)
 - [Detail Teknis](#-detail-teknis)
   - [Density Map Generation](#density-map-generation)
   - [Model Architecture](#model-architecture)
+  - [Augmentasi Skala dan Resize (Training)](#augmentasi-skala-dan-resize-training)
   - [Format Anotasi](#format-anotasi-json)
 - [Cara Menjalankan](#-cara-menjalankan)
 - [Teknologi yang Digunakan](#-teknologi-yang-digunakan)
 - [Roadmap & Pengembangan](#-roadmap--pengembangan)
+- [Catatan Penting](#-catatan-penting)
 
 ---
 
@@ -74,11 +76,16 @@ Proyek ini membangun pipeline end-to-end untuk menghitung jumlah part/komponen i
 CAPSTONE (Density Mapping)/
 │
 ├── 📄 README.md                    # Dokumentasi proyek ini
+├── 📄 requirements.txt             # Dependensi Python
 │
 ├── 🐍 point_labeler.py             # GUI tool anotasi titik koordinat
 ├── 🐍 generate_ground_truth.py     # Script generate density map ground truth
-├── 🐍 generate_density_map.py      # Utilitas & visualisasi density map
+├── 🐍 density_utils.py             # Shared module utilitas density map (KDTree & Visualisasi)
 ├── 🐍 model_dme.py                 # Arsitektur model deep learning
+├── 🐍 dataset_loader.py            # PyTorch Dataset & augmentasi (Albumentations)
+├── 🐍 train.py                     # Script utama proses training dengan MAE
+├── 🐍 predict.py                   # Script inference / prediksi pada gambar baru
+├── 🐍 fix_images.py                # Script utilitas perbaikan resolusi gambar dataset
 │
 └── 📂 dataset/
     ├── 📂 images/                   # Foto asli baut/part (.png, .jpg, .bmp)
@@ -105,18 +112,19 @@ CAPSTONE (Density Mapping)/
 ### Instalasi Dependencies
 
 ```bash
-# Install semua dependencies sekaligus
-pip install numpy opencv-python scipy matplotlib torch torchvision
+# Install dependencies via requirements.txt
+pip install -r requirements.txt
 ```
 
 | Library | Versi Min. | Kegunaan |
 |---------|-----------|----------|
 | `numpy` | 1.21+ | Operasi matriks & array |
 | `opencv-python` | 4.5+ | Image processing & GUI labeler |
-| `scipy` | 1.7+ | Gaussian filter untuk density map |
+| `scipy` | 1.7+ | KDTree untuk density map |
 | `matplotlib` | 3.4+ | Visualisasi heatmap overlay |
 | `torch` | 2.0+ | Deep learning framework |
 | `torchvision` | 0.15+ | Pretrained MobileNetV2 |
+| `albumentations` | 1.3+ | Pipeline augmentasi gambar dan density map secara sinkron |
 
 > **Catatan Windows:** Jika `python` tidak dikenali, gunakan `py` sebagai gantinya (Python Launcher for Windows).
 
@@ -141,7 +149,7 @@ Format yang didukung: `.png`, `.jpg`, `.jpeg`, `.bmp`, `.tif`, `.tiff`
 Tool GUI interaktif untuk menandai lokasi setiap objek pada gambar.
 
 ```bash
-py point_labeler.py
+python point_labeler.py
 ```
 
 #### Kontrol Keyboard
@@ -161,42 +169,22 @@ py point_labeler.py
 - ✅ Load anotasi sebelumnya secara otomatis jika sudah pernah di-save
 - ✅ Progres ditampilkan di terminal (`[1/N] filename.jpg`)
 
-#### Output
-
-File JSON disimpan di `dataset/annotations/` dengan format:
-
-```json
-{
-  "image": "sample_bolts.png",
-  "image_width": 1024,
-  "image_height": 1024,
-  "count": 7,
-  "points": [
-    [915, 514],
-    [782, 513],
-    [669, 427]
-  ]
-}
-```
-
 ---
 
 ### Step 3: Generate Ground Truth Density Map (`generate_ground_truth.py`)
 
-Mengonversi anotasi titik menjadi density map (ground truth) untuk training model.
+Mengonversi anotasi titik menjadi density map (ground truth) untuk training model. Menggunakan modul terpusat `density_utils.py`.
 
 ```bash
-py generate_ground_truth.py
+python generate_ground_truth.py
 ```
 
 #### Proses Internal
 
 1. Membaca semua `.json` dari `dataset/annotations/`
 2. Membuka gambar asli untuk mendapatkan dimensi (H × W)
-3. Membuat matriks nol berukuran H × W
-4. Meletakkan nilai `1` pada setiap koordinat `(y, x)` dari anotasi
-5. Mengaplikasikan **Gaussian filter** dengan `sigma=15`
-6. Menyimpan hasil sebagai `.npy` (presisi float32) dan `_vis.jpg` (visualisasi)
+3. Mengaplikasikan algoritma **KDTree Adaptive Sigma** di mana lebar Gaussian blob akan mengecil di area titik yang sangat padat dan membesar di area yang longgar (membantu model membedakan objek yang bertumpuk).
+4. Menyimpan hasil sebagai `.npy` (presisi float32) dan `_vis.jpg` (visualisasi)
 
 #### Output
 
@@ -214,9 +202,12 @@ py generate_ground_truth.py
   Annotations : dataset\annotations
   Images      : dataset\images
   Output      : dataset\ground_truth
-  Sigma       : 15
+  Algorithm   : KDTree Adaptive Sigma
   Total file  : 1
 ============================================================
+
+  Found 1 existing .npy files. Delete and regenerate? [y/N]: y
+  Deleted 1 .npy and 1 _vis.jpg files.
 
 [1/1] Memproses: sample_bolts.json
   Gambar  : sample_bolts.png
@@ -227,12 +218,6 @@ py generate_ground_truth.py
   Density map sum   : 7.0000 (idealnya ~ 7)
   Tersimpan (.npy)  : dataset\ground_truth\sample_bolts.npy
   Tersimpan (vis)   : dataset\ground_truth\sample_bolts_vis.jpg
-
-============================================================
-  SELESAI!
-  Berhasil : 1 file
-  Output   : dataset\ground_truth/
-============================================================
 ```
 
 > **Catatan:** Nilai `Density map sum` harus mendekati jumlah titik anotasi. Ini membuktikan bahwa Gaussian filter mempertahankan integritas jumlah objek.
@@ -245,18 +230,18 @@ Model deep learning untuk memprediksi density map dari gambar input.
 
 ```bash
 # Quick test arsitektur model
-py model_dme.py
+python model_dme.py
 ```
 
 #### Arsitektur: `DensityMapRegressor`
 
 ```
-Input Image (3, 224, 224)
+Input Image (3, 672, 512)
          │
          ▼
 ┌─────────────────────────┐
 │  MobileNetV2 (Pretrained)│   Feature Extractor
-│  Output: (1280, 7, 7)   │   (Classifier dihapus)
+│  Output: (1280, H/32, W/32) │   (Classifier dihapus)
 └────────────┬────────────┘
              │
              ▼
@@ -273,11 +258,11 @@ Input Image (3, 224, 224)
              │
              ▼
 ┌─────────────────────────┐
-│ Bilinear Upsample (32x)  │   (1, 7, 7) → (1, 224, 224)
+│ Bilinear Upsample (32x)  │   Mengembalikan spasial input
 └────────────┬────────────┘
              │
              ▼
-    Density Map (1, 224, 224)
+    Density Map (1, 672, 512)
     sum(pixels) ≈ object count
 ```
 
@@ -288,35 +273,21 @@ Input Image (3, 224, 224)
 | Backbone | MobileNetV2 (pretrained on ImageNet) |
 | Dilated Conv Layers | 3 layers, dilation=2 |
 | Upsample | Bilinear, scale_factor=32 |
-| Input Shape | `(batch, 3, 224, 224)` |
-| Output Shape | `(batch, 1, 224, 224)` |
+| Input Shape | `(batch, 3, 672, 512)` |
+| Output Shape | `(batch, 1, 672, 512)` |
 | Total Parameters | 8,715,009 |
 | Aktivasi Akhir | ReLU (output ≥ 0) |
 
-#### Mengapa Dilated Convolution?
-
-Dilated convolution memperluas **receptive field** tanpa menambah jumlah parameter. Ini penting untuk:
-- Menangkap konteks spasial yang lebih luas
-- Mengenali objek yang saling **tumpang tindih** atau berdekatan
-- Membedakan objek individual dalam area yang padat
-
 ---
 
-### Step 5: Utilitas & Visualisasi (`generate_density_map.py`)
+### Step 5: Utilitas & Visualisasi (`density_utils.py`)
 
-Modul utilitas berisi fungsi-fungsi yang dapat digunakan kembali (reusable).
-
-```bash
-# Demo dengan dummy data
-py generate_density_map.py
-```
-
-#### Fungsi yang Tersedia
+Modul utilitas terpusat (single source of truth) untuk mencegah divergensi kode antar pipeline:
 
 | Fungsi | Deskripsi |
 |--------|-----------|
-| `points_to_density_map(image_shape, points)` | Konversi koordinat titik → density map (sigma=4) |
-| `visualize_heatmap(image_path, density_map)` | Overlay density map di atas gambar (matplotlib, cmap='jet') |
+| `generate_density_map(image_shape, points)` | Konversi koordinat titik → density map menggunakan KDTree Adaptive Sigma |
+| `create_visualization(image, density_map)` | Overlay density map di atas gambar dengan parameter input_is_rgb dinamis |
 
 ---
 
@@ -324,7 +295,7 @@ py generate_density_map.py
 
 ### Density Map Generation
 
-Proses mengonversi anotasi titik menjadi density map:
+Proses mengonversi anotasi titik menjadi density map menggunakan algoritma:
 
 ```
 Anotasi Titik          Matriks Delta           Density Map (Gaussian)
@@ -336,14 +307,12 @@ Anotasi Titik          Matriks Delta           Density Map (Gaussian)
                        0 0 0 0 0 0             0.0 0.0 0.0 0.1 0.3
 ```
 
+**KDTree Adaptive Sigma**: Model dinamis ini menyebarkan setiap titik menjadi distribusi kontinu di mana lebarnya (`sigma`) dikalkulasi berdasarkan jarak ke 3 tetangga terdekat:
+- Area Padat: Objek saling tumpang tindih -> Jarak antar titik sangat dekat -> `sigma` kecil -> Blob menjadi lebih kecil dan tajam (mencegah blob bergabung menjadi satu gumpalan yang membingungkan model).
+- Area Jarang: Objek terpisah -> `sigma` membesar mengikuti jarak terdekat -> Coverage lebih baik.
+
+**Parameter Standar:** `BETA = 0.3`, `MIN_SIGMA = 4.0`, `MAX_SIGMA = 15.0`, `DEFAULT_SIGMA = 8.0`.
 **Properti kunci:** `sum(density_map) ≈ jumlah_objek`
-
-Gaussian filter "menyebarkan" setiap titik menjadi distribusi kontinu. Parameter `sigma` mengontrol lebar sebaran:
-
-| Script | Sigma | Kegunaan |
-|--------|-------|----------|
-| `generate_density_map.py` | 4 | Visualisasi cepat, objek kecil |
-| `generate_ground_truth.py` | 15 | Ground truth training, objek besar |
 
 ### Model Architecture
 
@@ -355,12 +324,18 @@ Gaussian filter "menyebarkan" setiap titik menjadi distribusi kontinu. Parameter
 **Dilated Convolution** digunakan karena:
 - ✅ Receptive field lebih luas tanpa menambah parameter
 - ✅ Mempertahankan resolusi spasial
-- ✅ Menangkap konteks multi-scale
+- ✅ Menangkap konteks multi-scale untuk mengenali objek yang saling tumpang tindih
 
 **Bilinear Upsample** digunakan karena:
-- ✅ Mengembalikan resolusi output ke ukuran input (224×224)
+- ✅ Mengembalikan resolusi output ke ukuran input
 - ✅ Tidak menambah parameter (parameter-free)
 - ✅ Menghasilkan transisi piksel yang halus
+
+### Augmentasi Skala dan Resize (Training)
+
+Untuk mempertahankan *scale-invariance* saat training, gambar diaugmentasi menggunakan rasio skala *(0.75 - 1.25)*. 
+Kunci penting dalam augmentasi ini adalah densitas per piksel wajib dikoreksi `/ scale_factor**2` agar nilai `sum(density_map)` tetap sesuai dengan jumlah anotasi asli. 
+Setelah di-scale, seluruh data training dan validasi akan di-resize statis secara seragam ke `672x512` agar batching stabil. Model hanya akan melihat data berukuran `672x512` selama proses training.
 
 ### Format Anotasi (JSON)
 
@@ -372,13 +347,10 @@ Gaussian filter "menyebarkan" setiap titik menjadi distribusi kontinu. Parameter
   "count": 7,
   "points": [
     [x1, y1],
-    [x2, y2],
-    ...
+    [x2, y2]
   ]
 }
 ```
-
-> **Penting:** Koordinat menggunakan format `[x, y]` (OpenCV convention). Saat dipetakan ke matriks NumPy, dikonversi menjadi `density[y, x]` karena NumPy menggunakan `(baris, kolom)`.
 
 ---
 
@@ -389,36 +361,41 @@ Gaussian filter "menyebarkan" setiap titik menjadi distribusi kontinu. Parameter
 cd "CAPSTONE (Density Mapping)"
 
 # 2. Install dependencies
-pip install numpy opencv-python scipy matplotlib torch torchvision
+pip install -r requirements.txt
+pip install -r requirements.txt
 
 # 3. Letakkan gambar ke dataset/images/
 
 # 4. Jalankan Point Labeler untuk anotasi
-py point_labeler.py
+python point_labeler.py
 
-# 5. Generate ground truth density map
-py generate_ground_truth.py
+# 5. Generate ground truth density map (WAJIB JALANKAN SEBELUM TRAINING)
+python generate_ground_truth.py
 
 # 6. Test arsitektur model
-py model_dme.py
+python model_dme.py
 
-# 7. (Opsional) Demo density map dengan dummy data
-py generate_density_map.py
+# 7. Training Model (Menggunakan Stratified Split Train/Val)
+python train.py
+
+# 8. Prediksi / Inference menggunakan Model terlatih (akan memuat checkpoints/best_dme_model.pth)
+python predict.py "path/to/gambar/test.jpg"
 ```
 
 ---
 
 ## 🛠 Teknologi yang Digunakan
 
-| Teknologi | Versi | Kegunaan |
-|-----------|-------|----------|
-| Python | 3.8+ | Bahasa pemrograman utama |
-| PyTorch | 2.0+ | Deep learning framework |
-| TorchVision | 0.15+ | Pretrained models (MobileNetV2) |
-| OpenCV | 4.5+ | Image processing & GUI annotation tool |
-| NumPy | 1.21+ | Operasi matriks & penyimpanan density map |
-| SciPy | 1.7+ | Gaussian filter untuk density map |
-| Matplotlib | 3.4+ | Visualisasi heatmap overlay |
+| Teknologi | Kegunaan |
+|-----------|----------|
+| Python | Bahasa pemrograman utama |
+| PyTorch | Deep learning framework |
+| TorchVision | Pretrained models (MobileNetV2) |
+| OpenCV | Image processing & GUI annotation tool |
+| NumPy | Operasi matriks & penyimpanan density map |
+| SciPy | KDTree perhitungan adaptive sigma |
+| Matplotlib | Visualisasi heatmap overlay |
+| Albumentations | Pipeline augmentasi & transformasi gambar |
 
 ---
 
@@ -426,13 +403,11 @@ py generate_density_map.py
 
 - [x] **Struktur dataset** — Folder `images/`, `annotations/`, `ground_truth/`
 - [x] **Point Labeler GUI** — Tool anotasi titik interaktif dengan undo
-- [x] **Ground Truth Generator** — Konversi anotasi → density map (.npy + visualisasi)
+- [x] **Ground Truth Generator** — Konversi anotasi → density map dengan KDTree Adaptive Sigma
 - [x] **Model Architecture** — MobileNetV2 + Dilated Conv + Upsample
-- [x] **Utilitas Density Map** — Fungsi reusable & visualisasi
-- [ ] **Dataset Loader** — PyTorch `Dataset` dan `DataLoader` untuk training
-- [ ] **Training Script** — Script training dengan loss function (MSE) dan optimizer
-- [ ] **Evaluation Metrics** — MAE, MSE, dan MAPE untuk evaluasi model
-- [ ] **Inference Script** — Prediksi jumlah objek dari gambar baru
+- [x] **Dataset Loader** — PyTorch `Dataset` dan `DataLoader` dengan **Stratified Split**
+- [x] **Training Script** — Training dengan MAE, Adam, dan checkpoint otomatis pada `best_val_mae`
+- [x] **Inference Script** — Modul prediksi *scale-invariant* `predict.py` dengan koreksi area
 - [ ] **Model Export** — Export model ke ONNX untuk deployment
 - [ ] **Web Interface** — Dashboard visualisasi hasil prediksi
 
@@ -443,15 +418,11 @@ py generate_density_map.py
 1. **Koordinat (x, y) vs (y, x):**
    - OpenCV dan JSON menggunakan format `(x, y)` — kolom dulu, baris kemudian
    - NumPy menggunakan format `(y, x)` — baris dulu, kolom kemudian
-   - Konversi ini sudah ditangani di semua script
+   - Konversi ini sudah ditangani secara otomatis di semua modul.
 
-2. **Nilai Sigma:**
-   - Sigma kecil (4) → heatmap tajam, cocok untuk objek kecil
-   - Sigma besar (15) → heatmap lebar, cocok untuk objek besar dan ground truth
-
-3. **Integritas Jumlah:**
-   - `sum(density_map)` harus mendekati jumlah objek yang dianotasi
-   - Ini adalah properti fundamental dari Gaussian filter yang mempertahankan integral
+2. **Integritas Jumlah:**
+   - Secara fundamental, Gaussian filter mempertahankan integral.
+   - `sum(density_map)` harus selalu mendekati jumlah objek yang dianotasi, bahkan setelah proses rotasi atau skala, asalkan koreksi densitas yang tepat diaplikasikan.
 
 ---
 

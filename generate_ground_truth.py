@@ -2,7 +2,9 @@ import os
 import json
 import numpy as np
 import cv2
-from scipy.ndimage import gaussian_filter
+
+# Import dari shared module
+from density_utils import generate_density_map, create_visualization
 
 
 # ==============================
@@ -11,61 +13,38 @@ from scipy.ndimage import gaussian_filter
 IMAGES_DIR = os.path.join('dataset', 'images')
 ANNOTATIONS_DIR = os.path.join('dataset', 'annotations')
 GROUND_TRUTH_DIR = os.path.join('dataset', 'ground_truth')
-SIGMA = 15  # Ukuran sebaran Gaussian heatmap
 
 
-def generate_density_map(image_shape, points, sigma=SIGMA):
+def clean_existing_ground_truth():
     """
-    Generate density map dari list koordinat titik.
-
-    Parameters:
-        image_shape (tuple): (height, width) dari gambar.
-        points (list): List koordinat [[x1, y1], [x2, y2], ...].
-        sigma (float): Sigma untuk Gaussian filter.
+    Hapus semua file .npy dan _vis.jpg yang ada di GROUND_TRUTH_DIR.
+    Meminta konfirmasi user terlebih dahulu.
 
     Returns:
-        numpy.ndarray: Density map (float32).
+        bool: True jika proses dilanjutkan, False jika user membatalkan.
     """
-    density = np.zeros(image_shape, dtype=np.float32)
+    if not os.path.exists(GROUND_TRUTH_DIR):
+        return True
 
-    for point in points:
-        x, y = int(point[0]), int(point[1])
+    existing_npy = [f for f in os.listdir(GROUND_TRUTH_DIR) if f.endswith('.npy')]
+    existing_vis = [f for f in os.listdir(GROUND_TRUTH_DIR) if f.endswith('_vis.jpg')]
 
-        # Pastikan koordinat dalam batas gambar
-        if 0 <= y < image_shape[0] and 0 <= x < image_shape[1]:
-            density[y, x] = 1  # Numpy: (baris/y, kolom/x)
+    if existing_npy:
+        confirm = input(
+            f"  Found {len(existing_npy)} existing .npy files. "
+            f"Delete and regenerate? [y/N]: "
+        )
+        if confirm.lower() != 'y':
+            print("  Aborted.")
+            return False
 
-    # Aplikasikan Gaussian filter
-    if len(points) > 0:
-        density = gaussian_filter(density, sigma=sigma)
+        # Hapus semua file .npy dan _vis.jpg
+        for f in existing_npy + existing_vis:
+            filepath = os.path.join(GROUND_TRUTH_DIR, f)
+            os.remove(filepath)
+        print(f"  Deleted {len(existing_npy)} .npy and {len(existing_vis)} _vis.jpg files.")
 
-    return density
-
-
-def create_visualization(image, density_map):
-    """
-    Buat overlay heatmap di atas gambar asli.
-
-    Parameters:
-        image (numpy.ndarray): Gambar asli (BGR).
-        density_map (numpy.ndarray): Density map (float32).
-
-    Returns:
-        numpy.ndarray: Gambar overlay (BGR).
-    """
-    # Normalisasi density map ke 0-255 untuk colormap
-    if density_map.max() > 0:
-        density_norm = (density_map / density_map.max() * 255).astype(np.uint8)
-    else:
-        density_norm = np.zeros_like(density_map, dtype=np.uint8)
-
-    # Terapkan colormap JET
-    heatmap = cv2.applyColorMap(density_norm, cv2.COLORMAP_JET)
-
-    # Overlay dengan alpha blending
-    overlay = cv2.addWeighted(image, 0.5, heatmap, 0.5, 0)
-
-    return overlay
+    return True
 
 
 def main():
@@ -89,9 +68,13 @@ def main():
     print(f"  Annotations : {ANNOTATIONS_DIR}")
     print(f"  Images      : {IMAGES_DIR}")
     print(f"  Output      : {GROUND_TRUTH_DIR}")
-    print(f"  Sigma       : {SIGMA}")
+    print(f"  Algorithm   : KDTree Adaptive Sigma")
     print(f"  Total file  : {len(json_files)}")
     print("=" * 60)
+
+    # --- Clean slate: hapus ground truth lama ---
+    if not clean_existing_ground_truth():
+        return
 
     success_count = 0
     error_count = 0
@@ -130,8 +113,8 @@ def main():
         h, w = image.shape[:2]
         print(f"  Dimensi : {w} x {h}")
 
-        # ---- 3. Generate density map ----
-        density_map = generate_density_map((h, w), points, sigma=SIGMA)
+        # ---- 3. Generate density map (KDTree adaptive sigma) ----
+        density_map = generate_density_map((h, w), points)
 
         print(f"  Density map shape : {density_map.shape}")
         print(f"  Density map max   : {density_map.max():.8f}")
